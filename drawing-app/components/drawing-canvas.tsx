@@ -16,9 +16,7 @@ export default function DrawingCanvas() {
   const [isDrawing, setIsDrawing] = useState(false)
   const [color, setColor] = useState("#ffffff")
   const [brushSize, setBrushSize] = useState(5)
-  const [prompt, setPrompt] = useState("")
   const [isGenerating, setIsGenerating] = useState(false)
-  const [generatedText, setGeneratedText] = useState<string | null>(null)
   const [generatedImage, setGeneratedImage] = useState<string | null>(null)
   const [generatedPrompt, setGeneratedPrompt] = useState<string | null>(null)
   const [isEraser, setIsEraser] = useState(false)
@@ -91,7 +89,6 @@ export default function DrawingCanvas() {
 
     ctx.fillStyle = "#000000"
     ctx.fillRect(0, 0, canvas.width, canvas.height)
-    setGeneratedText(null)
     setGeneratedImage(null)
     setGeneratedPrompt(null)
   }
@@ -111,36 +108,41 @@ export default function DrawingCanvas() {
     if (!canvas) return
 
     setIsGenerating(true)
-    setGeneratedText(null)
     setGeneratedImage(null)
     setGeneratedPrompt(null)
 
     try {
-      // Convert canvas to base64
+      // Convert canvas to base64 - Remove the data:image prefix
       const imageData = canvas.toDataURL("image/png").split(",")[1]
+
+      console.log("=== FRONTEND DEBUG ===")
+      console.log("Image data length:", imageData.length)
+      console.log("Selected style:", imageStyle)
+      console.log("First 50 chars:", imageData.substring(0, 50))
+
+      const payload = {
+        imageData,
+        style: imageStyle,
+      }
+
+      console.log("Sending payload:", payload)
 
       const response = await fetch("/api/generate", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({
-          imageData,
-          prompt:
-            prompt ||
-            "Analyze this drawing and describe what you see in detail. Provide creative suggestions for how this could be transformed into a complete artwork.",
-          style: imageStyle,
-        }),
+        body: JSON.stringify(payload),
       })
 
+      console.log("Response status:", response.status)
       const data = await response.json()
+      console.log("Response data:", data)
 
       if (data.error) {
+        console.error("API Error:", data.error)
         alert(`Error: ${data.error}`)
       } else {
-        if (data.text) {
-          setGeneratedText(data.text)
-        }
         if (data.image) {
           setGeneratedImage(data.image)
         }
@@ -150,7 +152,7 @@ export default function DrawingCanvas() {
       }
     } catch (error) {
       console.error("Error generating image:", error)
-      alert("Failed to generate. Please check your API key in environment variables.")
+      alert("Failed to generate. Please check your API configuration.")
     } finally {
       setIsGenerating(false)
     }
@@ -334,16 +336,16 @@ export default function DrawingCanvas() {
                 <Label className="text-foreground font-semibold text-lg">AI Generated Image</Label>
               </div>
 
-              {generatedPrompt && (
+              {/* {generatedPrompt && (
                 <div className="bg-background/80 backdrop-blur rounded-lg p-4 border border-border/50">
                   <p className="text-sm text-muted-foreground mb-1 font-medium">Prompt used:</p>
                   <p className="text-foreground leading-relaxed text-sm">{generatedPrompt}</p>
                 </div>
-              )}
+              )} */}
 
               <div className="bg-background/80 backdrop-blur rounded-lg p-4 border border-border/50">
                 <img
-                  src={`data:image/png;base64,${generatedImage}`}
+                  src={generatedImage}  // ✅ CORRECT - already has prefix from Lambda
                   alt="AI Generated"
                   className="w-full rounded-lg shadow-lg"
                 />
@@ -353,7 +355,7 @@ export default function DrawingCanvas() {
                 onClick={() => {
                   const link = document.createElement("a")
                   link.download = "ai-generated-image.png"
-                  link.href = `data:image/png;base64,${generatedImage}`
+                  link.href = generatedImage  // ✅ CORRECT
                   link.click()
                 }}
                 variant="default"
