@@ -1,166 +1,102 @@
 import { type NextRequest, NextResponse } from "next/server"
-import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3"
 
-const s3Client =
-  process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY
-    ? new S3Client({
-        region: process.env.AWS_REGION || "us-east-1",
-        credentials: {
-          accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-          secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-        },
-      })
-    : null
-
-async function uploadToS3(imageBuffer: Buffer, filename: string): Promise<string | null> {
-  if (!s3Client || !process.env.S3_BUCKET_NAME) {
-    console.log("S3 not configured, skipping upload")
-    return null
-  }
-
+export async function POST(request: NextRequest) {
   try {
-    const command = new PutObjectCommand({
-      Bucket: process.env.S3_BUCKET_NAME,
-      Key: `generated-images/${filename}`,
-      Body: imageBuffer,
-      ContentType: "image/png",
-    })
+    const apiGatewayUrl = process.env.API_GATEWAY_URL
 
-    await s3Client.send(command)
-    const s3Url = `https://${process.env.S3_BUCKET_NAME}.s3.${process.env.AWS_REGION || "us-east-1"}.amazonaws.com/generated-images/${filename}`
-    console.log("Image uploaded to S3:", s3Url)
-    return s3Url
-  } catch (error) {
-    console.error("Error uploading to S3:", error)
-    return null
-  }
-}
+    if (!apiGatewayUrl) {
+      return NextResponse.json(
+        { error: "API_GATEWAY_URL environment variable is not set" },
+        { status: 500 }
+      )
+    }
 
-async function invokeLambdaViaApiGateway(payload: any): Promise<any> {
-  const apiGatewayUrl = process.env.API_GATEWAY_URL
+    // Parse body
+    const body = await request.json()
+    const { imageData, style = "realistic" } = body
 
-  if (!apiGatewayUrl) {
-    console.log("API Gateway not configured, skipping Lambda invocation")
-    return null
-  }
+    console.log("=== API ROUTE DEBUG ===")
+    console.log("Received body keys:", Object.keys(body))
+    console.log("imageData exists?", !!imageData)
+    console.log("imageData length:", imageData?.length || 0)
+    console.log("imageData type:", typeof imageData)
+    console.log("style:", style)
+    console.log("First 50 chars:", imageData?.substring(0, 50))
 
-  try {
+    // Validate imageData
+    if (!imageData || imageData.length === 0) {
+      console.error("ERROR: No imageData in request body")
+      return NextResponse.json(
+        { error: "No image data received from client" },
+        { status: 400 }
+      )
+    }
+
+    // Prepare payload for Lambda
+    const lambdaPayload = {
+      imageData,
+      style,
+    }
+
+    console.log("=== SENDING TO LAMBDA ===")
+    console.log("Lambda payload keys:", Object.keys(lambdaPayload))
+    console.log("Lambda payload stringified length:", JSON.stringify(lambdaPayload).length)
+
+    // Call Lambda via API Gateway
     const response = await fetch(apiGatewayUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        ...(process.env.API_GATEWAY_API_KEY && {
-          "x-api-key": process.env.API_GATEWAY_API_KEY,
-        }),
       },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(lambdaPayload),
     })
 
+    console.log("Lambda response status:", response.status)
+    console.log("Lambda response headers:", Object.fromEntries(response.headers.entries()))
+
     if (!response.ok) {
-      console.error("Lambda invocation failed:", await response.text())
-      return null
-    }
-
-    return await response.json()
-  } catch (error) {
-    console.error("Error invoking Lambda:", error)
-    return null
-  }
-}
-
-export async function POST(request: NextRequest) {
-  try {
-    const apiKey = process.env.GEMINI_API_KEY
-
-    if (!apiKey) {
-      return NextResponse.json({ error: "GEMINI_API_KEY environment variable is not set" }, { status: 500 })
-    }
-
-    const { imageData, prompt, style = "realistic" } = await request.json()
-
-    if (process.env.API_GATEWAY_URL) {
-      console.log("Attempting Lambda processing via API Gateway")
-      const lambdaResult = await invokeLambdaViaApiGateway({
-        imageData,
-        prompt,
-        style,
-        apiKey,
-      })
-
-      if (lambdaResult && lambdaResult.success) {
-        console.log("Lambda processing successful")
-        return NextResponse.json(lambdaResult.data)
-      }
-
-      console.log("Lambda processing failed or not available, falling back to direct processing")
-    }
-
-    const analysisResponse = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${apiKey}`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          contents: [
-            {
-              parts: [
-                {
-                  text: `Analyze this drawing and create a detailed, artistic prompt for image generation in ${style} style. Describe what you see, the style, mood, colors, and composition. Make it vivid and descriptive for creating a beautiful ${style} image. Keep it 2-3 sentences.`,
-                },
-                {
-                  inline_data: {
-                    mime_type: "image/png",
-                    data: imageData,
-                  },
-                },
-              ],
-            },
-          ],
-        }),
-      },
-    )
-
-    const analysisData = await analysisResponse.json()
-
-    if (!analysisResponse.ok) {
-      console.error("Gemini Analysis error:", analysisData)
+      const errorText = await response.text()
+      console.error("Lambda invocation failed:", errorText)
       return NextResponse.json(
-        { error: analysisData.error?.message || "Failed to analyze drawing" },
-        { status: analysisResponse.status },
+        { error: "Failed to process image via Lambda", details: errorText },
+        { status: response.status }
       )
     }
 
-    const imagePrompt = analysisData.candidates?.[0]?.content?.parts?.[0]?.text
+    const responseData = await response.json()
+    console.log("=== LAMBDA RESPONSE ===")
+    console.log("Response type:", typeof responseData)
+    console.log("Response keys:", Object.keys(responseData))
+    console.log("Full response:", JSON.stringify(responseData, null, 2))
 
-    if (!imagePrompt) {
-      return NextResponse.json({ error: "Failed to generate prompt from drawing" }, { status: 500 })
+    // Parse body if it's a string (API Gateway format)
+    let result = responseData
+    if (responseData.body && typeof responseData.body === 'string') {
+      console.log("Parsing body string...")
+      result = JSON.parse(responseData.body)
     }
 
-    const pollinationsUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(imagePrompt + ` in ${style} style`)}?width=1024&height=1024&nologo=true&enhance=true`
+    console.log("Parsed result:", result)
 
-    // Fetch the image
-    const imageResponse = await fetch(pollinationsUrl)
-
-    if (!imageResponse.ok) {
-      return NextResponse.json({ error: "Failed to generate image" }, { status: 500 })
+    if (!result.success) {
+      return NextResponse.json(
+        { error: result.error || "Lambda processing failed" },
+        { status: 500 }
+      )
     }
 
-    // Convert to base64
-    const imageBuffer = await imageResponse.arrayBuffer()
-    const base64Image = Buffer.from(imageBuffer).toString("base64")
-
-    const filename = `${Date.now()}-${style}.png`
-    const s3Url = await uploadToS3(Buffer.from(imageBuffer), filename)
-
+    // Return data
     return NextResponse.json({
-      prompt: imagePrompt,
-      image: base64Image,
-      s3Url: s3Url,
+      prompt: result.data.prompt,
+      image: result.data.imageBase64,
+      s3Url: result.data.s3Url,
     })
+
   } catch (error) {
     console.error("Server error:", error)
-    return NextResponse.json({ error: "Internal server error" }, { status: 500 })
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "Internal server error" },
+      { status: 500 }
+    )
   }
 }
